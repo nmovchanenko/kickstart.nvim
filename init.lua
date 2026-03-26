@@ -904,7 +904,26 @@ require('lazy').setup({
       -- Load the colorscheme here.
       -- Like many other themes, this one has different styles, and you could load
       -- any other, such as 'tokyonight-storm', 'tokyonight-moon', or 'tokyonight-day'.
-      vim.cmd.colorscheme 'tokyonight-night'
+      -- vim.cmd.colorscheme 'tokyonight-night'
+    end,
+  },
+
+  {
+    'catppuccin/nvim',
+    name = 'catppuccin',
+    priority = 1000, -- Keep this high so it loads early
+    config = function()
+      require('catppuccin').setup {
+        flavour = 'mocha', -- mocha, macchiato, frappe, latte
+        -- You can add your custom catppuccin config here
+        styles = {
+          comments = { 'italic' },
+        },
+      }
+
+      -- Notice this is COMMENTED OUT.
+      -- Only one theme should have this uncommented at a time for your startup default.
+      vim.cmd.colorscheme 'catppuccin'
     end,
   },
 
