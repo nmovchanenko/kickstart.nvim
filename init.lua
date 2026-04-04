@@ -201,6 +201,27 @@ vim.keymap.set('n', '<C-h>', '<C-w><C-h>', { desc = 'Move focus to the left wind
 vim.keymap.set('n', '<C-l>', '<C-w><C-l>', { desc = 'Move focus to the right window' })
 vim.keymap.set('n', '<C-j>', '<C-w><C-j>', { desc = 'Move focus to the lower window' })
 vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper window' })
+vim.keymap.set('n', '<leader>cp', function()
+  local path = vim.fn.expand '%'
+  local line = vim.fn.line '.'
+  local location = path .. ':' .. line
+
+  -- Copy to system clipboard
+  vim.fn.setreg('+', location)
+
+  -- Print a nice message so you know it worked
+  print('Copied: ' .. location)
+end, { desc = '[C]opy [P]ath with line number' })
+vim.keymap.set('n', '<leader>cP', function()
+  -- The ':p' modifier tells Neovim to get the absolute (Full) path
+  local absolute_path = vim.fn.expand '%:p'
+
+  -- Copy to system clipboard ('+' register)
+  vim.fn.setreg('+', absolute_path)
+
+  -- Print a confirmation message
+  print('Copied Absolute Path: ' .. absolute_path)
+end, { desc = '[C]opy Absolute [P]ath' })
 
 -- NOTE: Some terminals have colliding keymaps or are not able to send distinct keycodes
 -- vim.keymap.set("n", "<C-S-h>", "<C-w>H", { desc = "Move window to the left" })
