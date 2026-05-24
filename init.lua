@@ -223,6 +223,9 @@ vim.keymap.set('n', '<leader>cP', function()
   print('Copied Absolute Path: ' .. absolute_path)
 end, { desc = '[C]opy Absolute [P]ath' })
 
+-- Keybinds to work with git
+vim.keymap.set('n', '<leader>gs', '<cmd>Telescope git_status<CR>', { desc = '[G]it [S]tatus Files' })
+
 -- NOTE: Some terminals have colliding keymaps or are not able to send distinct keycodes
 -- vim.keymap.set("n", "<C-S-h>", "<C-w>H", { desc = "Move window to the left" })
 -- vim.keymap.set("n", "<C-S-l>", "<C-w>L", { desc = "Move window to the right" })
