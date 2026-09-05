@@ -248,6 +248,20 @@ vim.api.nvim_create_autocmd('TextYankPost', {
   end,
 })
 
+-- preformat json with jq
+vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufWritePost' }, {
+  pattern = '*.json',
+  command = ':%!jq .',
+})
+
+-- Kill auto-continuation entirely for CSS-family files
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = { 'css', 'scss', 'less' },
+  callback = function()
+    vim.opt_local.formatoptions:remove { 'r', 'o' }
+  end,
+})
+
 -- [[ Install `lazy.nvim` plugin manager ]]
 --    See `:help lazy.nvim.txt` or https://github.com/folke/lazy.nvim for more info
 local lazypath = vim.fn.stdpath 'data' .. '/lazy/lazy.nvim'
