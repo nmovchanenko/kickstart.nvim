@@ -17,6 +17,8 @@ local config = {
   filetypes = { 'markdown' },
   -- Binary used for IPA transcription; must accept espeak-ng's option syntax.
   espeak = 'espeak-ng',
+  -- Folder of reading texts, one markdown file per text.
+  texts_dir = '~/Projects/github/private/vocab/texts',
 }
 
 local function warn(msg)
@@ -318,6 +320,181 @@ local function show_ipa()
   end
 end
 
+--- "3m ago", "2h ago", "5d ago". Coarse on purpose: the picker only needs
+--- enough to tell today's text from last week's.
+local function relative_time(stamp)
+  local seconds = os.time() - stamp
+  if seconds < 60 then
+    return 'just now'
+  end
+  for _, unit in ipairs { { 60, 'm', 60 }, { 3600, 'h', 24 }, { 86400, 'd', 7 }, { 604800, 'w', math.huge } } do
+    local size, suffix, limit = unit[1], unit[2], unit[3]
+    local count = math.floor(seconds / size)
+    if count < limit then
+      return count .. suffix .. ' ago'
+    end
+  end
+  return 'long ago'
+end
+
+--- Cut to `limit` characters, counting characters rather than bytes so a
+--- Slovak word never gets sliced through the middle of its UTF-8 encoding.
+local function truncate(text, limit)
+  if vim.fn.strcharlen(text) <= limit then
+    return text
+  end
+  return vim.fn.strcharpart(text, 0, limit - 1) .. '…'
+end
+
+--- A readable title for one text file.
+---
+--- Prefers the first markdown heading, else the first non-empty body line.
+--- Only the first 20 lines are read, so a folder of novels still opens fast.
+--- Front matter is detected by the '---' fence alone: these files carry lines
+--- like "povedal: ..." in the prose, which a looser "looks like YAML" test
+--- would happily eat.
+---@return string|nil title, or nil when the file is empty or unreadable
+local function text_title(path)
+  local ok, lines = pcall(vim.fn.readfile, path, '', 20)
+  if not ok or type(lines) ~= 'table' or #lines == 0 then
+    return nil
+  end
+
+  local start = 1
+  if vim.trim(lines[1]) == '---' then
+    local close = nil
+    for i = 2, #lines do
+      if vim.trim(lines[i]) == '---' then
+        close = i
+        break
+      end
+    end
+    -- An unterminated fence within the first 20 lines means the body is still
+    -- further down, so there is nothing to title with here.
+    if not close then
+      return nil
+    end
+    start = close + 1
+  end
+
+  local first_line
+  for i = start, #lines do
+    local line = vim.trim(lines[i])
+    if line ~= '' then
+      local heading = line:match '^#+%s+(.+)$'
+      if heading then
+        return truncate(vim.trim(heading), 60)
+      end
+      first_line = first_line or line
+    end
+  end
+
+  return first_line and truncate(first_line, 60) or nil
+end
+
+--- Every markdown file in the texts folder, newest first.
+---@return table[]|nil entries, or nil after notifying why there are none
+local function collect_texts()
+  local dir = vim.fn.expand(config.texts_dir)
+  local stat = vim.uv.fs_stat(dir)
+  if not stat or stat.type ~= 'directory' then
+    warn(('No texts folder at %s.'):format(dir))
+    return nil
+  end
+
+  local entries = {}
+  for name in vim.fs.dir(dir) do
+    if name:match '%.md$' then
+      local path = dir .. '/' .. name
+      -- fs_stat follows symlinks, so linked texts count as files.
+      local info = vim.uv.fs_stat(path)
+      if info and info.type == 'file' then
+        entries[#entries + 1] = { path = path, name = name, mtime = info.mtime.sec }
+      end
+    end
+  end
+
+  if #entries == 0 then
+    warn(('No markdown texts in %s.'):format(dir))
+    return nil
+  end
+
+  table.sort(entries, function(a, b)
+    return a.mtime > b.mtime
+  end)
+
+  return entries
+end
+
+--- Pick a text, newest first, with a preview.
+local function pick_text()
+  local entries = collect_texts()
+  if not entries then
+    return
+  end
+
+  local pickers = require 'telescope.pickers'
+  local finders = require 'telescope.finders'
+  local actions = require 'telescope.actions'
+  local action_state = require 'telescope.actions.state'
+  local entry_display = require 'telescope.pickers.entry_display'
+  local conf = require('telescope.config').values
+
+  local stamp_width = 0
+  for _, entry in ipairs(entries) do
+    entry.title = text_title(entry.path) or entry.name
+    entry.when = relative_time(entry.mtime)
+    stamp_width = math.max(stamp_width, vim.fn.strdisplaywidth(entry.when))
+  end
+
+  local displayer = entry_display.create {
+    separator = '  ',
+    items = { { width = stamp_width }, { remaining = true } },
+  }
+
+  pickers
+    .new({}, {
+      prompt_title = 'Slovak texts',
+      finder = finders.new_table {
+        results = entries,
+        entry_maker = function(entry)
+          return {
+            value = entry.path,
+            path = entry.path,
+            -- Both the title and the file name are searchable; the date lives
+            -- in the file name, so "09-23" narrows by day.
+            ordinal = entry.title .. ' ' .. entry.name,
+            display = function()
+              return displayer { { entry.when, 'TelescopeResultsComment' }, entry.title }
+            end,
+          }
+        end,
+      },
+      sorter = conf.generic_sorter {},
+      previewer = conf.file_previewer {},
+      attach_mappings = function(prompt_bufnr)
+        actions.select_default:replace(function()
+          local selected = action_state.get_selected_entry()
+          actions.close(prompt_bufnr)
+          if selected then
+            vim.cmd.edit(vim.fn.fnameescape(selected.value))
+          end
+        end)
+        return true
+      end,
+    })
+    :find()
+end
+
+--- Open the most recently modified text, no picker.
+local function open_latest_text()
+  local entries = collect_texts()
+  if not entries then
+    return
+  end
+  vim.cmd.edit(vim.fn.fnameescape(entries[1].path))
+end
+
 ---@param opts? { target?: string, prefix?: string, filetypes?: string[] }
 function M.setup(opts)
   config = vim.tbl_extend('force', config, opts or {})
@@ -343,6 +520,11 @@ function M.setup(opts)
     map('n', 'w', send_word, '[W]ord under cursor')
     map('n', 'i', show_ipa, '[I]PA of word under cursor')
   end
+
+  -- Global, unlike the four above: you open a text from wherever you are, not
+  -- only from inside another markdown buffer.
+  vim.keymap.set('n', config.prefix .. 't', pick_text, { desc = 'Slovak [T]exts (newest first)' })
+  vim.keymap.set('n', config.prefix .. 'l', open_latest_text, { desc = 'Slovak [L]atest text' })
 
   vim.api.nvim_create_autocmd('FileType', {
     group = vim.api.nvim_create_augroup('slovak-reader', { clear = true }),

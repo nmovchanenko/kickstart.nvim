@@ -49,9 +49,15 @@ All of them start with `<leader>r`, and your leader is the spacebar. So
 | `<leader>re` | visual | Sends the selection, presses Enter. You stay in Neovim. |
 | `<leader>ra` | visual | Sends the selection and waits, cursor lands in the Claude pane so you can type a question. |
 | `<leader>ri` | normal | Shows the IPA transcription of the word under the cursor. Stays in Neovim, sends nothing to Claude. |
+| `<leader>rt` | normal | Opens a picker of all your texts, newest first. |
+| `<leader>rl` | normal | Opens the most recently modified text straight away. |
 
 Everything arrives as one line, because Claude Code submits on Enter and a
 multi-line paste would fire off half a sentence.
+
+The first four only exist in markdown buffers, since they act on the text you're
+reading. `<leader>rt` and `<leader>rl` are global, because you use them to open a
+text in the first place, usually from an empty Neovim.
 
 ## Examples
 
@@ -150,6 +156,46 @@ SK> texts/lekcia.md:7 :: Krátky riadok. :: why is this instrumental?
 This is the one that moves your focus. The other two leave you in Neovim on
 purpose, so you can fire off five words in a row and read the answers later.
 
+## Opening a text
+
+`<leader>rt` lists every markdown file in your texts folder, newest first, with
+a preview:
+
+```
+╭──────────────── Results ─────────────────╮╭──── File Preview ────╮
+│  1d ago   10. Ranná návšteva             ││---                   │
+│  22h ago  Vážení rodičia,                ││saved: 2026-09-24     │
+│  17h ago  Antoine Saint-Exupéry: Malý... ││source: clipboard     │
+│  3h ago   Dnes ráno som prišiel na hla...││---                   │
+│> 2h ago   00:00:00.320 Dostali ste na... ││                      │
+╰──────────────────────────────────────────╯╰──────────────────────╯
+╭───────────────── Slovak texts ───────────────────────────────────╮
+│>                                                        17 / 17  │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+The newest text sits at the bottom, next to the prompt, already selected. That's
+Telescope's normal bottom-up ordering, so the freshest thing is nearest your
+fingers. Enter opens it in the current window.
+
+The title comes from the first markdown heading, or the first line of the body
+if there's no heading. Front matter is skipped, so `saved:` and `source:` never
+show up as titles. Only the first 20 lines of each file are read, so the list
+opens instantly whether you have 17 texts or 700.
+
+Typing filters on the title and the file name together. Both of these find the
+same file:
+
+```
+Antoine     matches the title, "Antoine Saint-Exupéry: Malý princ"
+princ       matches the file name, 2026-09-23-malý-princ.md
+```
+
+Since the date is in the file name, typing `09-23` narrows to one day.
+
+`<leader>rl` skips the picker and opens the newest text directly. It's the one
+you want when you're picking up where you left off.
+
 ## The message format
 
 ```
@@ -187,6 +233,7 @@ config = function()
     prefix = '<leader>r',
     filetypes = { 'markdown' },
     espeak = 'espeak-ng',
+    texts_dir = '~/Projects/github/private/vocab/texts',
   }
 end,
 ```
@@ -199,6 +246,11 @@ A fixed id is worth it if you always work in the same layout.
 
 `prefix` is the leading keys for all four maps. `filetypes` is where they
 exist. Adding `'text'` or `'org'` is fine if you read those too.
+
+`texts_dir` is the folder `<leader>rt` and `<leader>rl` read. `~` is expanded
+for you. If you change `prefix`, update the `keys` list in
+`lua/custom/plugins/slovak-reader.lua` too, since lazy.nvim needs to know which
+keys should load the plugin.
 
 `espeak` is the binary used for IPA. Point it somewhere else if yours isn't on
 `PATH`, for example `/opt/homebrew/bin/espeak-ng`. It has to take espeak-ng's
@@ -220,6 +272,8 @@ notification in Neovim.
 | `Selection is empty` | Nothing selected. |
 | `'espeak-ng' not found` | espeak-ng isn't installed or isn't on `PATH`. Install it, or set `espeak`. Shown once per session. |
 | `... could not transcribe '...'` | espeak-ng ran but failed, usually a missing Slovak voice data file. Check with `espeak-ng -v sk --ipa -q test`. |
+| `No texts folder at ...` | `texts_dir` points somewhere that isn't a directory. |
+| `No markdown texts in ...` | The folder is there but holds no `.md` files. |
 
 If the keys do nothing at all and you see no notification, you're probably not
 in a markdown buffer. Check with `:set filetype?`.
