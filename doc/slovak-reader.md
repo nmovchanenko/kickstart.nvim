@@ -49,13 +49,15 @@ All of them start with `<leader>r`, and your leader is the spacebar. So
 | `<leader>re` | visual | Sends the selection, presses Enter. You stay in Neovim. |
 | `<leader>ra` | visual | Sends the selection and waits, cursor lands in the Claude pane so you can type a question. |
 | `<leader>ri` | normal | Shows the IPA transcription of the word under the cursor. Stays in Neovim, sends nothing to Claude. |
+| `<leader>rd` | normal | Marks the text as done, at the cursor line. Sends nothing to Claude. |
+| `<leader>rx` | normal | Marks the text as dropped, at the cursor line. Sends nothing to Claude. |
 | `<leader>rt` | normal | Opens a picker of all your texts, newest first. |
 | `<leader>rl` | normal | Opens the most recently modified text straight away. |
 
 Everything arrives as one line, because Claude Code submits on Enter and a
 multi-line paste would fire off half a sentence.
 
-The first four only exist in markdown buffers, since they act on the text you're
+The first six only exist in markdown buffers, since they act on the text you're
 reading. `<leader>rt` and `<leader>rl` are global, because you use them to open a
 text in the first place, usually from an empty Neovim.
 
@@ -128,7 +130,7 @@ kôň     [kˈuoɲ]
 pekné   [pˈekneː]
 ```
 
-You need espeak-ng for this one key. The other three work without it.
+You need espeak-ng for this one key. The others work without it.
 
 ```sh
 brew install espeak-ng          # macOS
@@ -162,39 +164,114 @@ purpose, so you can fire off five words in a row and read the answers later.
 a preview:
 
 ```
-╭──────────────── Results ─────────────────╮╭──── File Preview ────╮
-│  1d ago   10. Ranná návšteva             ││---                   │
-│  22h ago  Vážení rodičia,                ││saved: 2026-09-24     │
-│  17h ago  Antoine Saint-Exupéry: Malý... ││source: clipboard     │
-│  3h ago   Dnes ráno som prišiel na hla...││---                   │
-│> 2h ago   00:00:00.320 Dostali ste na... ││                      │
-╰──────────────────────────────────────────╯╰──────────────────────╯
-╭───────────────── Slovak texts ───────────────────────────────────╮
-│>                                                        17 / 17  │
-╰──────────────────────────────────────────────────────────────────╯
+╭──────────────────── Results ─────────────────────╮╭──── File Preview ────╮
+│  1d   A2  dialóg   Ranná návšteva            191 ││---                   │
+│  22h  B1  list     Vážení rodičia            170 ││saved: 2026-09-24     │
+│  17h  B2  próza    Malý princ                12k ││source: clipboard     │
+│  3h                Dnes ráno som prišiel ...     ││title: Rodinný dom... │
+│> 2h   B1  inzerát  Rodinný dom v Kalinkove   380 ││type: inzerát         │
+╰──────────────────────────────────────────────────╯╰──────────────────────╯
+╭─────────────────────── Slovak texts ─────────────────────────────────────╮
+│>                                                                17 / 17  │
+╰──────────────────────────────────────────────────────────────────────────╯
 ```
+
+The columns are how long ago the file changed, the level, the genre, the title
+and the length in words. Long counts are shortened: `180`, `1.2k`, `12k`.
 
 The newest text sits at the bottom, next to the prompt, already selected. That's
 Telescope's normal bottom-up ordering, so the freshest thing is nearest your
 fingers. Enter opens it in the current window.
 
-The title comes from the first markdown heading, or the first line of the body
-if there's no heading. Front matter is skipped, so `saved:` and `source:` never
-show up as titles. Only the first 20 lines of each file are read, so the list
-opens instantly whether you have 17 texts or 700.
+Level, genre, title and length come from the [front matter](#front-matter). A
+text that hasn't been annotated yet, like the `3h` one above, just has empty
+columns. Each column is as wide as its longest value, so while nothing has a
+level yet the column takes no room at all.
 
-Typing filters on the title and the file name together. Both of these find the
-same file:
+The title is the `title` field. Without it, it's the first markdown heading, or
+the first line of the body if there's no heading. Front matter is never taken
+for a title, so `saved:` and `source:` don't show up there. Only the first 20
+lines of each file are read, once, so the list opens instantly whether you have
+17 texts or 700.
+
+Typing filters on the title, the file name, the genre and the level together.
+All of these find something:
 
 ```
-Antoine     matches the title, "Antoine Saint-Exupéry: Malý princ"
-princ       matches the file name, 2026-09-23-malý-princ.md
+princ       matches the title, "Malý princ", and the file name
+inzerát     matches the genre
+inzerat     matches it too, diacritics or not
+B2          matches the level
 ```
 
 Since the date is in the file name, typing `09-23` narrows to one day.
 
 `<leader>rl` skips the picker and opens the newest text directly. It's the one
 you want when you're picking up where you left off.
+
+Both of them put you back where you stopped. If you marked the text with
+`<leader>rd` or `<leader>rx`, the cursor lands on that line, centred on screen.
+A text you never marked opens at the top.
+
+## Marking where you stopped
+
+`<leader>rd` says you finished the text, `<leader>rx` says you gave up on it.
+Either way, the cursor line is where you stopped. Press it on the last line you
+actually read.
+
+```
+done · line 210
+```
+
+That's all you see. Behind it, `bin/sk-status` in your texts repository writes
+`status` and `read_to` into the front matter and works out how hard the text
+turned out to be from the questions you asked about it. It runs in the
+background, so you can keep scrolling while it does.
+
+The file changes on disk under your open buffer, and the buffer is reloaded for
+you, quietly. The front matter may have grown by a couple of lines, so the text
+moves down, and the cursor moves down with it. You stay on the same sentence.
+
+The script is found next to your `CLAUDE.md`, as `<root>/bin/sk-status`. That's
+the same root the paths in `SK>` messages use, see
+[the message format](#the-message-format). There's nothing to configure.
+
+The line that gets saved counts from the start of the body, not the file. Mark
+line 30 of a file whose front matter takes four lines and you get `read_to: 26`.
+That number keeps pointing at the same sentence as the front matter grows,
+because Neovim adds whatever the fence height is when you open the file again.
+
+Neovim never writes the front matter itself. The scripts in the texts repository
+are the only writer, and they take a lock so the background annotator and your
+marks don't overwrite each other.
+
+## Front matter
+
+Texts can start with a block like this:
+
+```yaml
+---
+saved: 2026-09-23 20:30
+source: clipboard
+title: Malý princ
+type: próza
+level: B2
+words: 12801
+status: dropped
+read_to: 49
+---
+```
+
+This module reads `title`, `type`, `level` and `words` for the picker, and
+`read_to` for where to open. It writes nothing.
+
+The fields are defined by the texts repository, in `docs/frontmatter.md` at its
+root, not here. This module only reads them. If the two disagree, the repository
+is right. The same goes for `CLAUDE.md` as the path anchor: someone else's
+contract, and it's described once, over there.
+
+Any field can be missing. A text with just `saved` and `source` is normal, the
+annotator hasn't reached it yet. Its columns stay empty.
 
 ## The message format
 
@@ -244,7 +321,7 @@ even when the Claude pane is the focused one. You can also name a pane outright,
 either a tmux id like `%12` or a `session:window.pane` address like `slovak:1.1`.
 A fixed id is worth it if you always work in the same layout.
 
-`prefix` is the leading keys for all four maps. `filetypes` is where they
+`prefix` is the leading keys for all the maps. `filetypes` is where they
 exist. Adding `'text'` or `'org'` is fine if you read those too.
 
 `texts_dir` is the folder `<leader>rt` and `<leader>rl` read. `~` is expanded
@@ -274,6 +351,11 @@ notification in Neovim.
 | `... could not transcribe '...'` | espeak-ng ran but failed, usually a missing Slovak voice data file. Check with `espeak-ng -v sk --ipa -q test`. |
 | `No texts folder at ...` | `texts_dir` points somewhere that isn't a directory. |
 | `No markdown texts in ...` | The folder is there but holds no `.md` files. |
+| `.../bin/sk-status is missing or not executable` | The texts repository has no `bin/sk-status`, or it lost its `x` bit. Check with `ls -l bin/sk-status` in the repository. |
+| `No CLAUDE.md above this file, so bin/sk-status cannot be found` | The text isn't inside the texts repository, so there's no root to find the script in. |
+| `Cursor is inside the front matter` | `<leader>rd` and `<leader>rx` need the cursor in the text itself. |
+| `Buffer has unsaved changes` | The script works on the file on disk. Save first, `:w`, then mark. |
+| `sk-status: ...` | The script ran and refused. The rest of the message is its own explanation. |
 
 If the keys do nothing at all and you see no notification, you're probably not
 in a markdown buffer. Check with `:set filetype?`.

@@ -187,6 +187,12 @@ local function one_line(text)
   return vim.trim((text:gsub('%s+', ' ')))
 end
 
+--- The nearest ancestor of `abs` holding a CLAUDE.md, or nil when there is none.
+local function project_root(abs)
+  local marker = vim.fs.find({ 'CLAUDE.md' }, { upward = true, type = 'file', limit = 1, path = vim.fs.dirname(abs) })[1]
+  return marker and vim.fs.dirname(marker)
+end
+
 --- Path relative to the nearest ancestor holding a CLAUDE.md, else to the cwd.
 local function display_path(bufnr)
   local abs = vim.api.nvim_buf_get_name(bufnr)
@@ -194,10 +200,36 @@ local function display_path(bufnr)
     return '[No Name]'
   end
 
-  local marker = vim.fs.find({ 'CLAUDE.md' }, { upward = true, type = 'file', limit = 1, path = vim.fs.dirname(abs) })[1]
-  local root = marker and vim.fs.dirname(marker) or vim.uv.cwd()
+  local root = project_root(abs) or vim.uv.cwd()
 
   return vim.fs.relpath(root, abs) or abs
+end
+
+--- Line number of the closing '---' of the front matter, 0 when there is none.
+---
+--- The fence is detected by '---' alone: these files carry lines like
+--- "povedal: ..." in the prose, which a looser "looks like YAML" test would
+--- happily eat. Returns nil when a fence opens but does not close within
+--- `lines`, so a caller that read only the head of a file can tell "no front
+--- matter" from "front matter longer than what I read".
+---@param lines string[]
+---@return integer|nil
+local function fence_end(lines)
+  if #lines == 0 or vim.trim(lines[1]) ~= '---' then
+    return 0
+  end
+  for i = 2, #lines do
+    if vim.trim(lines[i]) == '---' then
+      return i
+    end
+  end
+  return nil
+end
+
+--- fence_end() for a whole buffer. An unterminated fence counts as none, which
+--- is also how bin/sk-status reads the file.
+local function buffer_fence_end(bufnr)
+  return fence_end(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) or 0
 end
 
 local function line_spec(first, last)
@@ -320,21 +352,137 @@ local function show_ipa()
   end
 end
 
---- "3m ago", "2h ago", "5d ago". Coarse on purpose: the picker only needs
---- enough to tell today's text from last week's.
+--- Where to stand after bin/sk-status rewrote the file under an open buffer.
+---
+--- Tell every window showing `bufnr` to reload it and keep the same text under
+--- the cursor. The script may have added `status:` and `read_to:`, which pushes
+--- the body down, so views move by the change in fence height rather than
+--- staying on the same buffer line.
+local function reload_in_place(bufnr)
+  local before = buffer_fence_end(bufnr)
+  local views = {}
+  for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+    views[win] = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+  end
+
+  -- The buffer is unmodified, so with 'autoread' (on by default) this reloads
+  -- silently instead of raising W11 on the next keypress.
+  vim.cmd.checktime(tostring(bufnr))
+
+  local shift = buffer_fence_end(bufnr) - before
+  for win, view in pairs(views) do
+    if vim.api.nvim_win_is_valid(win) then
+      local last = vim.api.nvim_buf_line_count(bufnr)
+      view.lnum = math.max(1, math.min(view.lnum + shift, last))
+      view.topline = math.max(1, math.min(view.topline + shift, last))
+      vim.api.nvim_win_call(win, function()
+        vim.fn.winrestview(view)
+      end)
+    end
+  end
+end
+
+--- Mark the text in the current buffer as `status` ('done' or 'dropped') at
+--- the cursor, via bin/sk-status of the text repository.
+---
+--- The script, not Neovim, writes the front matter: it holds the lock that the
+--- background annotator also takes, and a second writer would clobber fields.
+local function mark_progress(status)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local path = vim.api.nvim_buf_get_name(bufnr)
+  if path == '' then
+    warn 'Buffer has no file - nothing marked.'
+    return
+  end
+
+  -- The script reads the file from disk, so unsaved edits would put the
+  -- cursor line and the file out of step, and reloading would have to ask.
+  if vim.bo[bufnr].modified then
+    warn 'Buffer has unsaved changes - save it first, nothing marked.'
+    return
+  end
+
+  local root = project_root(path)
+  if not root then
+    warn 'No CLAUDE.md above this file, so bin/sk-status cannot be found - nothing marked.'
+    return
+  end
+
+  local script = root .. '/bin/sk-status'
+  if vim.fn.executable(script) ~= 1 then
+    warn(('%s is missing or not executable - nothing marked.'):format(vim.fn.fnamemodify(script, ':~')))
+    return
+  end
+
+  -- read_to counts lines of the body, not of the buffer: the front matter
+  -- grows as fields are added, and a file-based number would drift.
+  local line = vim.api.nvim_win_get_cursor(0)[1] - buffer_fence_end(bufnr)
+  if line < 1 then
+    warn 'Cursor is inside the front matter - nothing marked.'
+    return
+  end
+
+  local spawned = pcall(vim.system, { script, path, status, tostring(line) }, { text = true }, function(res)
+    vim.schedule(function()
+      if res.code ~= 0 then
+        local err = vim.trim(res.stderr or '')
+        warn(err ~= '' and err or ('bin/sk-status failed with exit ' .. res.code))
+        return
+      end
+      if vim.api.nvim_buf_is_valid(bufnr) and not vim.bo[bufnr].modified then
+        reload_in_place(bufnr)
+      end
+      info(('%s · line %d'):format(status, line))
+    end)
+  end)
+
+  -- Checked above, but the file can still vanish between the check and here.
+  if not spawned then
+    warn(('%s could not be started - nothing marked.'):format(vim.fn.fnamemodify(script, ':~')))
+  end
+end
+
+--- "3m", "2h", "5d". Coarse on purpose: the picker only needs enough to tell
+--- today's text from last week's.
 local function relative_time(stamp)
   local seconds = os.time() - stamp
   if seconds < 60 then
-    return 'just now'
+    return 'now'
   end
   for _, unit in ipairs { { 60, 'm', 60 }, { 3600, 'h', 24 }, { 86400, 'd', 7 }, { 604800, 'w', math.huge } } do
     local size, suffix, limit = unit[1], unit[2], unit[3]
     local count = math.floor(seconds / size)
     if count < limit then
-      return count .. suffix .. ' ago'
+      return count .. suffix
     end
   end
   return 'long ago'
+end
+
+--- "180", "1.2k", "12k". Anything that is not a number is shown as it came.
+local function short_count(value)
+  local n = tonumber(value)
+  if not n then
+    return value or ''
+  elseif n < 1000 then
+    return tostring(math.floor(n))
+  elseif n < 10000 then
+    -- Rounded down, so 9999 reads 9.9k rather than a misleading 10.0k.
+    return (('%.1f'):format(math.floor(n / 100) / 10):gsub('%.0$', '')) .. 'k'
+  end
+  return math.floor(n / 1000) .. 'k'
+end
+
+local PLAIN = {
+  ['á'] = 'a', ['ä'] = 'a', ['č'] = 'c', ['ď'] = 'd', ['é'] = 'e', ['í'] = 'i', ['ĺ'] = 'l', ['ľ'] = 'l', ['ň'] = 'n',
+  ['ó'] = 'o', ['ô'] = 'o', ['ŕ'] = 'r', ['š'] = 's', ['ť'] = 't', ['ú'] = 'u', ['ý'] = 'y', ['ž'] = 'z',
+}
+
+--- Strip Slovak diacritics, so typing "inzerat" finds "inzerát".
+--- Lowercase only: the picker's sorter ignores case anyway.
+local function plain(text)
+  -- Each Slovak letter is two bytes in UTF-8, lead byte 0xC3-0xC5.
+  return (text:lower():gsub('[\195-\197][\128-\191]', PLAIN))
 end
 
 --- Cut to `limit` characters, counting characters rather than bytes so a
@@ -346,50 +494,85 @@ local function truncate(text, limit)
   return vim.fn.strcharpart(text, 0, limit - 1) .. '…'
 end
 
---- A readable title for one text file.
----
---- Prefers the first markdown heading, else the first non-empty body line.
---- Only the first 20 lines are read, so a folder of novels still opens fast.
---- Front matter is detected by the '---' fence alone: these files carry lines
---- like "povedal: ..." in the prose, which a looser "looks like YAML" test
---- would happily eat.
----@return string|nil title, or nil when the file is empty or unreadable
-local function text_title(path)
-  local ok, lines = pcall(vim.fn.readfile, path, '', 20)
-  if not ok or type(lines) ~= 'table' or #lines == 0 then
-    return nil
+--- Undo the quoting bin/sk-frontmatter applies to awkward values.
+local function unquote(value)
+  local double = value:match '^"(.*)"$'
+  if double then
+    return (double:gsub('\\"', '"'):gsub('\\\\', '\\'))
   end
+  local single = value:match "^'(.*)'$"
+  if single then
+    return (single:gsub("''", "'"))
+  end
+  return value
+end
 
-  local start = 1
-  if vim.trim(lines[1]) == '---' then
-    local close = nil
-    for i = 2, #lines do
-      if vim.trim(lines[i]) == '---' then
-        close = i
-        break
+--- Flat `key: value` lines of the front matter. The schema belongs to the
+--- text repository (docs/frontmatter.md there) and promises no nesting and no
+--- lists, so this is all the parsing it takes.
+local function parse_fields(lines, first, last)
+  local fields = {}
+  for i = first, last do
+    local key, value = lines[i]:match '^([%a_][%w_-]*):%s?(.*)$'
+    if key then
+      value = unquote(vim.trim(value))
+      if value ~= '' then
+        fields[key] = value
       end
     end
-    -- An unterminated fence within the first 20 lines means the body is still
-    -- further down, so there is nothing to title with here.
-    if not close then
-      return nil
-    end
-    start = close + 1
+  end
+  return fields
+end
+
+--- Front matter fields and a readable title for one text file.
+---
+--- The title is the `title` field, else the first markdown heading, else the
+--- first non-empty body line. Only the first 20 lines are read, once, so a
+--- folder of novels still opens fast.
+---@return { title: string|nil, fields: table<string, string> }
+local function text_meta(path)
+  local ok, lines = pcall(vim.fn.readfile, path, '', 20)
+  if not ok or type(lines) ~= 'table' then
+    return { fields = {} }
+  end
+
+  local close = fence_end(lines)
+  -- A fence that is still open at line 20 holds fields all the way down, so
+  -- whatever was read is front matter and the body is out of reach.
+  local fields = close ~= 0 and parse_fields(lines, 2, (close or #lines + 1) - 1) or {}
+  if fields.title then
+    return { title = truncate(fields.title, 60), fields = fields }
   end
 
   local first_line
-  for i = start, #lines do
+  for i = (close or #lines) + 1, #lines do
     local line = vim.trim(lines[i])
     if line ~= '' then
       local heading = line:match '^#+%s+(.+)$'
       if heading then
-        return truncate(vim.trim(heading), 60)
+        return { title = truncate(vim.trim(heading), 60), fields = fields }
       end
       first_line = first_line or line
     end
   end
 
-  return first_line and truncate(first_line, 60) or nil
+  return { title = first_line and truncate(first_line, 60), fields = fields }
+end
+
+--- Open `path` in the current window. With a `read_to`, land on that line of
+--- the body, centred: the fence height is taken from the buffer just opened,
+--- so a front matter that has grown since the mark still lands on the same text.
+local function open_text(path, read_to)
+  vim.cmd.edit(vim.fn.fnameescape(path))
+
+  local line = tonumber(read_to)
+  if not line then
+    return
+  end
+  local last = vim.api.nvim_buf_line_count(0)
+  line = math.max(1, math.min(math.floor(line) + buffer_fence_end(0), last))
+  vim.api.nvim_win_set_cursor(0, { line, 0 })
+  vim.cmd 'normal! zz'
 end
 
 --- Every markdown file in the texts folder, newest first.
@@ -440,16 +623,34 @@ local function pick_text()
   local entry_display = require 'telescope.pickers.entry_display'
   local conf = require('telescope.config').values
 
-  local stamp_width = 0
+  -- Every column is as wide as its widest value, so a column nobody has
+  -- filled in yet takes no room at all instead of a gap.
+  local width = { when = 0, level = 0, type = 0, title = 0, words = 0 }
   for _, entry in ipairs(entries) do
-    entry.title = text_title(entry.path) or entry.name
+    local meta = text_meta(entry.path)
+    entry.fields = meta.fields
+    entry.title = meta.title or entry.name
     entry.when = relative_time(entry.mtime)
-    stamp_width = math.max(stamp_width, vim.fn.strdisplaywidth(entry.when))
+    entry.level = meta.fields.level or ''
+    entry.type = meta.fields.type or ''
+    entry.words = meta.fields.words and short_count(meta.fields.words) or ''
+    for key in pairs(width) do
+      width[key] = math.max(width[key], vim.fn.strdisplaywidth(entry[key]))
+    end
   end
+
+  local columns = { 'when', 'level', 'type', 'title', 'words' }
+  columns = vim.tbl_filter(function(key)
+    return width[key] > 0
+  end, columns)
+
+  local highlight = { when = 'TelescopeResultsComment', level = 'TelescopeResultsIdentifier', type = 'TelescopeResultsComment', words = 'TelescopeResultsComment' }
 
   local displayer = entry_display.create {
     separator = '  ',
-    items = { { width = stamp_width }, { remaining = true } },
+    items = vim.tbl_map(function(key)
+      return { width = width[key], right_justify = key == 'words' }
+    end, columns),
   }
 
   pickers
@@ -461,11 +662,15 @@ local function pick_text()
           return {
             value = entry.path,
             path = entry.path,
-            -- Both the title and the file name are searchable; the date lives
-            -- in the file name, so "09-23" narrows by day.
-            ordinal = entry.title .. ' ' .. entry.name,
+            read_to = entry.fields.read_to,
+            -- The title, the file name, the genre and the level are all
+            -- searchable. The date lives in the file name, so "09-23" narrows
+            -- by day; the genre goes in twice, so "inzerat" finds "inzerát".
+            ordinal = table.concat({ entry.title, entry.name, entry.type, plain(entry.type), entry.level }, ' '),
             display = function()
-              return displayer { { entry.when, 'TelescopeResultsComment' }, entry.title }
+              return displayer(vim.tbl_map(function(key)
+                return highlight[key] and { entry[key], highlight[key] } or entry[key]
+              end, columns))
             end,
           }
         end,
@@ -477,7 +682,7 @@ local function pick_text()
           local selected = action_state.get_selected_entry()
           actions.close(prompt_bufnr)
           if selected then
-            vim.cmd.edit(vim.fn.fnameescape(selected.value))
+            open_text(selected.value, selected.read_to)
           end
         end)
         return true
@@ -492,7 +697,8 @@ local function open_latest_text()
   if not entries then
     return
   end
-  vim.cmd.edit(vim.fn.fnameescape(entries[1].path))
+  -- Only this one file's head is read; the rest of the folder is never opened.
+  open_text(entries[1].path, text_meta(entries[1].path).fields.read_to)
 end
 
 ---@param opts? { target?: string, prefix?: string, filetypes?: string[] }
@@ -519,9 +725,17 @@ function M.setup(opts)
 
     map('n', 'w', send_word, '[W]ord under cursor')
     map('n', 'i', show_ipa, '[I]PA of word under cursor')
+
+    map('n', 'd', function()
+      mark_progress 'done'
+    end, 'Mark text [D]one here')
+
+    map('n', 'x', function()
+      mark_progress 'dropped'
+    end, 'Mark text dropped here ([X])')
   end
 
-  -- Global, unlike the four above: you open a text from wherever you are, not
+  -- Global, unlike the six above: you open a text from wherever you are, not
   -- only from inside another markdown buffer.
   vim.keymap.set('n', config.prefix .. 't', pick_text, { desc = 'Slovak [T]exts (newest first)' })
   vim.keymap.set('n', config.prefix .. 'l', open_latest_text, { desc = 'Slovak [L]atest text' })
