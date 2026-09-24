@@ -27,7 +27,7 @@ return {
     -- Optional: tune the mini view's timeout (ms)
     views = {
       mini = {
-        timeout = 5000, -- bumped from default ~3s to 5s
+        timeout = 10000,
       },
     },
   },
