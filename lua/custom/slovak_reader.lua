@@ -15,6 +15,8 @@ local config = {
   target = '{right-of}',
   prefix = '<leader>r',
   filetypes = { 'markdown' },
+  -- Binary used for IPA transcription; must accept espeak-ng's option syntax.
+  espeak = 'espeak-ng',
 }
 
 local function warn(msg)
@@ -23,6 +25,16 @@ end
 
 local function info(msg)
   vim.notify(msg, vim.log.levels.INFO, { title = 'slovak-reader' })
+end
+
+--- Warn at most once per `kind` per session, so a missing binary or a broken
+--- voice does not pop a notification on every keypress.
+local warned = {}
+local function warn_once(kind, msg)
+  if not warned[kind] then
+    warned[kind] = true
+    warn(msg)
+  end
 end
 
 local function tmux(args)
@@ -212,6 +224,20 @@ local function preview(text)
   return vim.fn.strcharlen(text) > 40 and (vim.fn.strcharpart(text, 0, 40) .. '…') or text
 end
 
+--- The word under the cursor, or nil after warning why there isn't one.
+---
+--- <cword> already treats Slovak letters as word characters: Neovim classifies
+--- multibyte chars via utf_class(), so Latin Extended-A (č ď ĺ ľ ň ŕ š ť ž)
+--- counts regardless of 'iskeyword' only spelling out 192-255 (á ä é í ó ô ú ý).
+local function cursor_word()
+  local word = one_line(vim.fn.expand '<cword>')
+  if word == '' or word:match '^%p+$' then
+    warn 'No word under the cursor - nothing sent.'
+    return nil
+  end
+  return word
+end
+
 local function send_visual(opts)
   local text, first, last = visual_selection()
   stop_visual()
@@ -239,12 +265,8 @@ local function send_visual(opts)
 end
 
 local function send_word()
-  -- <cword> already treats Slovak letters as word characters: Neovim classifies
-  -- multibyte chars via utf_class(), so Latin Extended-A (č ď ĺ ľ ň ŕ š ť ž)
-  -- counts regardless of 'iskeyword' only spelling out 192-255 (á ä é í ó ô ú ý).
-  local word = one_line(vim.fn.expand '<cword>')
-  if word == '' or word:match '^%p+$' then
-    warn 'No word under the cursor - nothing sent.'
+  local word = cursor_word()
+  if not word then
     return
   end
 
@@ -258,6 +280,41 @@ local function send_word()
 
   if send(pane, message, { enter = true }) then
     info('→ Claude: ' .. word)
+  end
+end
+
+--- Show the IPA transcription of the word under the cursor.
+---
+--- Runs espeak-ng asynchronously, so a slow start never blocks scrolling.
+local function show_ipa()
+  local word = cursor_word()
+  if not word then
+    return
+  end
+
+  -- '--' keeps a word that starts with '-' from being read as an option;
+  -- espeak-ng would otherwise print "invalid option" and still exit 0.
+  local cmd = { config.espeak, '-v', 'sk', '--ipa', '-q', '--', word }
+
+  local spawned = pcall(vim.system, cmd, { text = true }, function(res)
+    -- on_exit runs in a fast event context, where vim.fn and the UI are off
+    -- limits, so every notification goes through vim.schedule.
+    vim.schedule(function()
+      local ipa = vim.trim(res.stdout or '')
+      if res.code ~= 0 or ipa == '' then
+        warn_once(
+          'ipa-failed',
+          ("%s could not transcribe '%s': %s"):format(config.espeak, word, vim.trim(res.stderr or '') ~= '' and vim.trim(res.stderr) or ('exit ' .. res.code))
+        )
+        return
+      end
+      info(('%s  [%s]'):format(word, ipa))
+    end)
+  end)
+
+  -- vim.system throws ENOENT rather than calling back when the binary is absent.
+  if not spawned then
+    warn_once('ipa-missing', ("'%s' not found - install espeak-ng for IPA."):format(config.espeak))
   end
 end
 
@@ -284,6 +341,7 @@ function M.setup(opts)
     end, '[A]sk about selection (focus Claude)')
 
     map('n', 'w', send_word, '[W]ord under cursor')
+    map('n', 'i', show_ipa, '[I]PA of word under cursor')
   end
 
   vim.api.nvim_create_autocmd('FileType', {

@@ -12,6 +12,7 @@ never lose your cursor position and you never touch the mouse.
 - tmux, with Neovim and Claude Code side by side in the same window
 - Neovim 0.11 or newer (it uses `vim.fs.relpath()`, added in 0.11)
 - A markdown file. The keymaps only exist in markdown buffers.
+- espeak-ng, but only for the IPA keymap. Everything else works without it.
 
 Claude Code has to be in a pane to the **right** of Neovim, in the same window.
 That's the default and you can change it, see [configuration](#configuration).
@@ -37,7 +38,7 @@ nvim texts/lekcia.md
 # claude       in the new pane
 ```
 
-## The three keymaps
+## The keymaps
 
 All of them start with `<leader>r`, and your leader is the spacebar. So
 `<leader>rw` means space, then `r`, then `w`.
@@ -47,6 +48,7 @@ All of them start with `<leader>r`, and your leader is the spacebar. So
 | `<leader>rw` | normal | Sends the word under the cursor, presses Enter. You stay in Neovim. |
 | `<leader>re` | visual | Sends the selection, presses Enter. You stay in Neovim. |
 | `<leader>ra` | visual | Sends the selection and waits, cursor lands in the Claude pane so you can type a question. |
+| `<leader>ri` | normal | Shows the IPA transcription of the word under the cursor. Stays in Neovim, sends nothing to Claude. |
 
 Everything arrives as one line, because Claude Code submits on Enter and a
 multi-line paste would fire off half a sentence.
@@ -99,6 +101,36 @@ inside a single line gives you one number instead of a range:
 ```
 SK> texts/lekcia.md:3 :: ťažký žltý
 ```
+
+### How is it pronounced
+
+Put the cursor on `ťažký` and press `<leader>ri`. A notification appears in
+Neovim:
+
+```
+ťažký  [tʲˈaʃkiː]
+```
+
+This one never touches the Claude pane. It shells out to `espeak-ng` and shows
+the answer locally, so it costs you nothing and works with no Claude session
+running. A few more:
+
+```
+kôň     [kˈuoɲ]
+žlti    [ʒˈl̩tiː]
+Ľúbil   [ʎˈuːbil]
+pekné   [pˈekneː]
+```
+
+You need espeak-ng for this one key. The other three work without it.
+
+```sh
+brew install espeak-ng          # macOS
+sudo apt install espeak-ng      # Debian, Ubuntu
+```
+
+If it isn't installed you get one warning the first time you press the key, and
+nothing after that.
 
 ### Asking your own question
 
@@ -154,6 +186,7 @@ config = function()
     target = '{right-of}',
     prefix = '<leader>r',
     filetypes = { 'markdown' },
+    espeak = 'espeak-ng',
   }
 end,
 ```
@@ -164,8 +197,12 @@ even when the Claude pane is the focused one. You can also name a pane outright,
 either a tmux id like `%12` or a `session:window.pane` address like `slovak:1.1`.
 A fixed id is worth it if you always work in the same layout.
 
-`prefix` is the leading keys for all three maps. `filetypes` is where they
+`prefix` is the leading keys for all four maps. `filetypes` is where they
 exist. Adding `'text'` or `'org'` is fine if you read those too.
+
+`espeak` is the binary used for IPA. Point it somewhere else if yours isn't on
+`PATH`, for example `/opt/homebrew/bin/espeak-ng`. It has to take espeak-ng's
+options, so plain `espeak` may or may not work depending on your version.
 
 ## When nothing happens
 
@@ -181,6 +218,8 @@ notification in Neovim.
 | `No tmux pane matches '...'` | You named a pane that's gone. Ids change when panes close, so prefer `{right-of}` or a `session:window.pane` address. |
 | `No word under the cursor` | The cursor is on blank space or punctuation. |
 | `Selection is empty` | Nothing selected. |
+| `'espeak-ng' not found` | espeak-ng isn't installed or isn't on `PATH`. Install it, or set `espeak`. Shown once per session. |
+| `... could not transcribe '...'` | espeak-ng ran but failed, usually a missing Slovak voice data file. Check with `espeak-ng -v sk --ipa -q test`. |
 
 If the keys do nothing at all and you see no notification, you're probably not
 in a markdown buffer. Check with `:set filetype?`.
