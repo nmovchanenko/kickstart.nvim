@@ -47,6 +47,8 @@ All of them start with `<leader>r`, and your leader is the spacebar. So
 |------|------|--------------|
 | `<leader>rw` | normal | Sends the word under the cursor, presses Enter. You stay in Neovim. |
 | `<leader>re` | visual | Sends the selection, presses Enter. You stay in Neovim. |
+| `<leader>rs` | normal | Sends the word under the cursor as `SKV>`, presses Enter. Claude explains it in Slovak. You stay in Neovim. |
+| `<leader>rs` | visual | Sends the selection as `SKV>`, presses Enter. Claude explains it in Slovak. You stay in Neovim. |
 | `<leader>ra` | visual | Sends the selection and waits, cursor lands in the Claude pane so you can type a question. |
 | `<leader>ri` | normal | Shows the IPA transcription of the word under the cursor. Stays in Neovim, sends nothing to Claude. |
 | `<leader>rd` | normal | Marks the text as done, at the cursor line. Sends nothing to Claude. |
@@ -57,7 +59,7 @@ All of them start with `<leader>r`, and your leader is the spacebar. So
 Everything arrives as one line, because Claude Code submits on Enter and a
 multi-line paste would fire off half a sentence.
 
-The first six only exist in markdown buffers, since they act on the text you're
+The first eight only exist in markdown buffers, since they act on the text you're
 reading. `<leader>rt` and `<leader>rl` are global, because you use them to open a
 text in the first place, usually from an empty Neovim.
 
@@ -110,6 +112,19 @@ inside a single line gives you one number instead of a range:
 SK> texts/lekcia.md:3 :: ťažký žltý
 ```
 
+### Explained in Slovak
+
+Put the cursor inside `ťažký` on line 3 and press `<leader>rs`.
+
+Claude receives:
+
+```
+SKV> texts/lekcia.md:3 :: ťažký
+```
+
+It works exactly like `<leader>rw`, and in visual mode like `<leader>re`. Only
+the prefix differs, see [the message format](#the-message-format).
+
 ### How is it pronounced
 
 Put the cursor on `ťažký` and press `<leader>ri`. A notification appears in
@@ -155,7 +170,7 @@ Type your question on the end and press Enter yourself:
 SK> texts/lekcia.md:7 :: Krátky riadok. :: why is this instrumental?
 ```
 
-This is the one that moves your focus. The other two leave you in Neovim on
+This is the one that moves your focus. The others leave you in Neovim on
 purpose, so you can fire off five words in a row and read the answers later.
 
 ## Opening a text
@@ -164,20 +179,26 @@ purpose, so you can fire off five words in a row and read the answers later.
 a preview:
 
 ```
-╭──────────────────── Results ─────────────────────╮╭──── File Preview ────╮
-│  1d   A2  dialóg   Ranná návšteva            191 ││---                   │
-│  22h  B1  list     Vážení rodičia            170 ││saved: 2026-09-24     │
-│  17h  B2  próza    Malý princ                12k ││source: clipboard     │
-│  3h                Dnes ráno som prišiel ...     ││title: Rodinný dom... │
-│> 2h   B1  inzerát  Rodinný dom v Kalinkove   380 ││type: inzerát         │
-╰──────────────────────────────────────────────────╯╰──────────────────────╯
-╭─────────────────────── Slovak texts ─────────────────────────────────────╮
-│>                                                                17 / 17  │
-╰──────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────── Results ─────────────────────────╮╭──── File Preview ────╮
+│  1d   A2  dialóg   Ranná návšteva            191  done    ││---                   │
+│  22h  B1  list     Vážení rodičia            170          ││saved: 2026-09-24     │
+│  17h  B2  próza    Malý princ                12k  dropped ││source: clipboard     │
+│  3h                Dnes ráno som prišiel ...              ││title: Rodinný dom... │
+│> 2h   B1  inzerát  Rodinný dom v Kalinkove   380          ││type: inzerát         │
+╰──────────────────────────────────────────────────────────╯╰──────────────────────╯
+╭─────────────────────────── Slovak texts ─────────────────────────────────────────╮
+│>                                                                        17 / 17  │
+╰──────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-The columns are how long ago the file changed, the level, the genre, the title
-and the length in words. Long counts are shortened: `180`, `1.2k`, `12k`.
+The columns are how long ago the text was saved, the level, the genre, the
+title, the length in words and whether you finished it: `done` or `dropped`,
+as marked with `<leader>rd` and `<leader>rx`. An unmarked text leaves that
+column blank. The age comes from the `saved` field, and the
+list is sorted by it too. The file's own dates are no use here: the scripts in
+the texts repository rewrite the file on every mark and annotation, which
+resets both its modification and creation time. A text without `saved` falls
+back to the file's creation time. Long counts are shortened: `180`, `1.2k`, `12k`.
 
 The newest text sits at the bottom, next to the prompt, already selected. That's
 Telescope's normal bottom-up ordering, so the freshest thing is nearest your
@@ -194,15 +215,26 @@ for a title, so `saved:` and `source:` don't show up there. Only the first 20
 lines of each file are read, once, so the list opens instantly whether you have
 17 texts or 700.
 
-Typing filters on the title, the file name, the genre and the level together.
-All of these find something:
+Typing filters on the title, the file name, the genre, the level and the
+status together.
+
+A word that is exactly a status, a level or a genre some text has is taken
+literally and matched against that column alone. Anything else is fuzzy, as
+usual in Telescope, and matched across the whole line:
 
 ```
-princ       matches the title, "Malý princ", and the file name
-inzerát     matches the genre
-inzerat     matches it too, diacritics or not
-B2          matches the level
+done        only texts marked done, nothing else
+dropped b1  texts you gave up on, at B1
+inzerát     only ads
+inzerat     the same, diacritics or not
+dialog done finished dialogues
+princ       fuzzy: the title "Malý princ", the file name, and anything
+            else with p, r, i, n, c in that order
 ```
+
+The exact words are needed because fuzzy matching is loose. Fuzzy, `done` also
+finds "Vychádzka **do** kniž**n**ic**e**", since those letters show up in that
+order. As an exact word it only matches the status column.
 
 Since the date is in the file name, typing `09-23` narrows to one day.
 
@@ -262,7 +294,7 @@ read_to: 49
 ---
 ```
 
-This module reads `title`, `type`, `level` and `words` for the picker, and
+This module reads `title`, `type`, `level`, `words` and `status` for the picker, and
 `read_to` for where to open. It writes nothing.
 
 The fields are defined by the texts repository, in `docs/frontmatter.md` at its
@@ -278,7 +310,13 @@ annotator hasn't reached it yet. Its columns stay empty.
 ```
 SK> <path>:<line> :: <text>
 SK> <path>:<start>-<end> :: <text>
+SKV> <path>:<line> :: <text>
+SKV> <path>:<start>-<end> :: <text>
 ```
+
+`SKV>` is built exactly like `SK>`: same one-line text, same path, same pane.
+The difference is on Claude's side: it explains the text in Slovak and doesn't
+write the question to the log.
 
 The path is relative to your project root, and the root is the nearest parent
 directory containing a `CLAUDE.md`. With this tree:

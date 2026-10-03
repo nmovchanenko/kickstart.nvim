@@ -6,6 +6,8 @@
 ---   SK> <path>:<line> :: <text>
 ---   SK> <path>:<start>-<end> :: <text>
 ---
+--- SKV> has the same shape and asks for an explanation in Slovak instead.
+---
 --- See `setup()` for the available options.
 
 local M = {}
@@ -272,21 +274,16 @@ local function cursor_word()
   return word
 end
 
-local function send_visual(opts)
-  local text, first, last = visual_selection()
-  stop_visual()
-
-  if text == '' then
-    warn 'Selection is empty - nothing sent.'
-    return
-  end
-
+--- Send `<tag>> <path>:<lines> :: <text>` to the Claude pane. `tag` is the
+--- message prefix without its '>': 'SK' for a plain lookup, 'SKV' for an
+--- explanation in Slovak.
+local function dispatch(tag, first, last, text, opts)
   local pane = resolve_pane()
   if not pane then
     return
   end
 
-  local message = ('SK> %s:%s :: %s'):format(display_path(0), line_spec(first, last), text)
+  local message = ('%s> %s:%s :: %s'):format(tag, display_path(0), line_spec(first, last), text)
   -- The "ask" variant leaves a trailing ' :: ' and no Enter, so a question can
   -- be typed straight onto the line.
   if opts.ask then
@@ -298,23 +295,26 @@ local function send_visual(opts)
   end
 end
 
-local function send_word()
+local function send_visual(tag, opts)
+  local text, first, last = visual_selection()
+  stop_visual()
+
+  if text == '' then
+    warn 'Selection is empty - nothing sent.'
+    return
+  end
+
+  dispatch(tag, first, last, text, opts)
+end
+
+local function send_word(tag)
   local word = cursor_word()
   if not word then
     return
   end
 
-  local pane = resolve_pane()
-  if not pane then
-    return
-  end
-
   local line = vim.api.nvim_win_get_cursor(0)[1]
-  local message = ('SK> %s:%d :: %s'):format(display_path(0), line, word)
-
-  if send(pane, message, { enter = true }) then
-    info('→ Claude: ' .. word)
-  end
+  dispatch(tag, line, line, word, {})
 end
 
 --- Show the IPA transcription of the word under the cursor.
@@ -459,6 +459,15 @@ local function relative_time(stamp)
   return 'long ago'
 end
 
+--- The `saved` field ("2026-09-23 20:30", local time) as a timestamp.
+local function parse_saved(value)
+  local y, mo, d, h, mi = (value or ''):match '^(%d%d%d%d)-(%d%d)-(%d%d)[ T](%d%d):(%d%d)'
+  if not y then
+    return nil
+  end
+  return os.time { year = tonumber(y), month = tonumber(mo), day = tonumber(d), hour = tonumber(h), min = tonumber(mi) }
+end
+
 --- "180", "1.2k", "12k". Anything that is not a number is shown as it came.
 local function short_count(value)
   local n = tonumber(value)
@@ -592,7 +601,8 @@ local function collect_texts()
       -- fs_stat follows symlinks, so linked texts count as files.
       local info = vim.uv.fs_stat(path)
       if info and info.type == 'file' then
-        entries[#entries + 1] = { path = path, name = name, mtime = info.mtime.sec }
+        local born = info.birthtime and info.birthtime.sec
+        entries[#entries + 1] = { path = path, name = name, mtime = info.mtime.sec, born = born ~= 0 and born or info.mtime.sec }
       end
     end
   end
@@ -625,26 +635,97 @@ local function pick_text()
 
   -- Every column is as wide as its widest value, so a column nobody has
   -- filled in yet takes no room at all instead of a gap.
-  local width = { when = 0, level = 0, type = 0, title = 0, words = 0 }
+  local width = { when = 0, level = 0, type = 0, title = 0, words = 0, status = 0 }
   for _, entry in ipairs(entries) do
     local meta = text_meta(entry.path)
     entry.fields = meta.fields
     entry.title = meta.title or entry.name
-    entry.when = relative_time(entry.mtime)
+    -- When the text was saved, not when the file last changed: the scripts
+    -- in bin/ rewrite files on every mark and annotation. The file's own
+    -- birth time is no better, since an atomic rewrite is a new file, so it
+    -- is only the fallback for texts without `saved`.
+    entry.created = parse_saved(meta.fields.saved) or entry.born
+    entry.when = relative_time(entry.created)
     entry.level = meta.fields.level or ''
     entry.type = meta.fields.type or ''
     entry.words = meta.fields.words and short_count(meta.fields.words) or ''
+    entry.status = meta.fields.status or ''
     for key in pairs(width) do
       width[key] = math.max(width[key], vim.fn.strdisplaywidth(entry[key]))
     end
   end
 
-  local columns = { 'when', 'level', 'type', 'title', 'words' }
+  -- Ordered by the same time the first column shows, or the column would
+  -- read out of order.
+  -- Texts saved within the same minute keep a steady order between runs.
+  table.sort(entries, function(a, b)
+    if a.created ~= b.created then
+      return a.created > b.created
+    end
+    return a.name > b.name
+  end)
+
+  local columns = { 'when', 'level', 'type', 'title', 'words', 'status' }
   columns = vim.tbl_filter(function(key)
     return width[key] > 0
   end, columns)
 
   local highlight = { when = 'TelescopeResultsComment', level = 'TelescopeResultsIdentifier', type = 'TelescopeResultsComment', words = 'TelescopeResultsComment' }
+  -- A status the schema adds later still shows, just without a colour of its own.
+  local status_highlight = { done = 'DiagnosticOk', dropped = 'DiagnosticWarn' }
+
+  -- A prompt word that is exactly some text's status, level or genre filters
+  -- on that field instead of being fuzzy-matched: fuzzy, "done" also finds
+  -- "Vychádzka DO kNižnicE", scattered over the title. The values come from
+  -- the texts themselves, so a genre added to the schema works the same.
+  local fields = { 'status', 'level', 'type' }
+  local exact = {}
+  for _, entry in ipairs(entries) do
+    for _, field in ipairs(fields) do
+      if entry[field] ~= '' then
+        exact[plain(entry[field])] = field
+      end
+    end
+  end
+
+  --- Split the prompt into the exact words, as { field = value }, and the
+  --- rest, which is left to the fuzzy sorter.
+  local function split_prompt(prompt)
+    local wanted, rest = {}, {}
+    for word in prompt:gmatch '%S+' do
+      local field = exact[plain(word)]
+      if field then
+        wanted[field] = plain(word)
+      else
+        rest[#rest + 1] = word
+      end
+    end
+    return wanted, table.concat(rest, ' ')
+  end
+
+  local sorter = conf.generic_sorter {}
+  sorter.filter_function = function(_, prompt, entry)
+    local wanted, rest = split_prompt(prompt)
+    for field, value in pairs(wanted) do
+      if plain(entry.text[field]) ~= value then
+        return -1, rest
+      end
+    end
+    return 0, rest
+  end
+  -- Highlight only what was fuzzy-matched, not the letters of "done" wherever
+  -- they happen to fall in the line.
+  local highlighter = sorter.highlighter
+  if highlighter then
+    sorter.highlighter = function(self, prompt, display)
+      -- fzf-native sees a filter_function and assumes Telescope's own
+      -- ":tag:" prefilter, whose delimiter this sorter never sets; the prompt
+      -- is already cleaned here, so its own cleanup is switched off.
+      self.__highlight_prefilter = nil
+      local _, rest = split_prompt(prompt)
+      return highlighter(self, rest, display)
+    end
+  end
 
   local displayer = entry_display.create {
     separator = '  ',
@@ -663,19 +744,21 @@ local function pick_text()
             value = entry.path,
             path = entry.path,
             read_to = entry.fields.read_to,
-            -- The title, the file name, the genre and the level are all
-            -- searchable. The date lives in the file name, so "09-23" narrows
+            text = entry,
+            -- The title, the file name, the genre, the level and the status
+            -- are all searchable. The date lives in the file name, so "09-23" narrows
             -- by day; the genre goes in twice, so "inzerat" finds "inzerát".
-            ordinal = table.concat({ entry.title, entry.name, entry.type, plain(entry.type), entry.level }, ' '),
+            ordinal = table.concat({ entry.title, entry.name, entry.type, plain(entry.type), entry.level, entry.status }, ' '),
             display = function()
               return displayer(vim.tbl_map(function(key)
-                return highlight[key] and { entry[key], highlight[key] } or entry[key]
+                local hl = key == 'status' and (status_highlight[entry.status] or 'TelescopeResultsComment') or highlight[key]
+                return hl and { entry[key], hl } or entry[key]
               end, columns))
             end,
           }
         end,
       },
-      sorter = conf.generic_sorter {},
+      sorter = sorter,
       previewer = conf.file_previewer {},
       attach_mappings = function(prompt_bufnr)
         actions.select_default:replace(function()
@@ -716,14 +799,25 @@ function M.setup(opts)
     end
 
     map('x', 'e', function()
-      send_visual { ask = false }
+      send_visual('SK', { ask = false })
     end, '[E]xplain selection (stay in Neovim)')
 
     map('x', 'a', function()
-      send_visual { ask = true }
+      send_visual('SK', { ask = true })
     end, '[A]sk about selection (focus Claude)')
 
-    map('n', 'w', send_word, '[W]ord under cursor')
+    map('x', 's', function()
+      send_visual('SKV', { ask = false })
+    end, 'Explain selection in [S]lovak (stay in Neovim)')
+
+    map('n', 'w', function()
+      send_word 'SK'
+    end, '[W]ord under cursor')
+
+    map('n', 's', function()
+      send_word 'SKV'
+    end, 'Explain word in [S]lovak')
+
     map('n', 'i', show_ipa, '[I]PA of word under cursor')
 
     map('n', 'd', function()
@@ -735,7 +829,7 @@ function M.setup(opts)
     end, 'Mark text dropped here ([X])')
   end
 
-  -- Global, unlike the six above: you open a text from wherever you are, not
+  -- Global, unlike the eight above: you open a text from wherever you are, not
   -- only from inside another markdown buffer.
   vim.keymap.set('n', config.prefix .. 't', pick_text, { desc = 'Slovak [T]exts (newest first)' })
   vim.keymap.set('n', config.prefix .. 'l', open_latest_text, { desc = 'Slovak [L]atest text' })
