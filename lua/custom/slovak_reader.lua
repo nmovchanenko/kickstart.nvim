@@ -8,6 +8,10 @@
 ---
 --- SKV> has the same shape and asks for an explanation in Slovak instead.
 ---
+---   /sk-diff <path>:<lines> :: <word> | <word>[ | <word>]
+---
+--- asks how two or three words differ; see `compare()`.
+---
 --- See `setup()` for the available options.
 
 local M = {}
@@ -774,6 +778,388 @@ local function pick_text()
     :find()
 end
 
+--- Lemmas the texts repository has logged, most-asked first, as { lemma, ru }.
+---
+--- The list comes from the repository's own script, which owns the log format:
+--- `bin/sk-phrases --type word --tsv` prints `lemma<TAB>translation`.
+---@return table[]|nil lemmas, or nil after notifying why there are none
+local function collect_lemmas(root)
+  local script = root .. '/bin/sk-phrases'
+  if vim.fn.executable(script) ~= 1 then
+    warn(('%s is missing or not executable - nothing sent.'):format(vim.fn.fnamemodify(script, ':~')))
+    return nil
+  end
+
+  local ok, res = pcall(function()
+    return vim.system({ script, '--type', 'word', '--tsv' }, { text = true }):wait()
+  end)
+  if not ok or res.code ~= 0 then
+    local err = ok and vim.trim(res.stderr or '') or ''
+    warn(err ~= '' and err or 'bin/sk-phrases failed - nothing sent.')
+    return nil
+  end
+
+  local lemmas = {}
+  for line in vim.gsplit(res.stdout or '', '\n', { trimempty = true }) do
+    local lemma, ru = line:match '^([^\t]+)\t(.*)$'
+    if lemma then
+      lemmas[#lemmas + 1] = { lemma = lemma, ru = ru }
+    end
+  end
+  return lemmas
+end
+
+--- Ask Claude how `word` differs from one or two others, picked from the
+--- logged lemmas or typed in, as
+---
+---   /sk-diff <path>:<lines> :: <word> | <other>[ | <other>]
+---
+--- The comparison runs in the background on Claude's side, so this sends with
+--- Enter and leaves you in Neovim, like <leader>rw.
+local function compare(word, first, last)
+  local root = project_root(vim.api.nvim_buf_get_name(0))
+  if not root then
+    warn 'No CLAUDE.md above this file, so bin/sk-phrases cannot be found - nothing sent.'
+    return
+  end
+
+  local lemmas = collect_lemmas(root)
+  if not lemmas then
+    return
+  end
+
+  -- Resolved before the picker opens, so a missing pane is reported before
+  -- you have spent time picking.
+  local pane = resolve_pane()
+  if not pane then
+    return
+  end
+  local path = display_path(0)
+
+  local function submit(others)
+    if #others == 0 then
+      warn 'Nothing picked or typed - nothing sent.'
+      return
+    end
+    if #others > 2 then
+      warn 'Compare with at most two words - nothing sent.'
+      return
+    end
+    local words = table.concat(vim.list_extend({ word }, others), ' | ')
+    if send(pane, ('/sk-diff %s:%s :: %s'):format(path, line_spec(first, last), words), { enter = true }) then
+      info('→ Claude: ' .. preview(words))
+    end
+  end
+
+  local pickers = require 'telescope.pickers'
+  local finders = require 'telescope.finders'
+  local actions = require 'telescope.actions'
+  local action_state = require 'telescope.actions.state'
+  local entry_display = require 'telescope.pickers.entry_display'
+  local conf = require('telescope.config').values
+
+  local width = 0
+  for _, entry in ipairs(lemmas) do
+    width = math.max(width, vim.fn.strdisplaywidth(entry.lemma))
+  end
+  local displayer = entry_display.create {
+    separator = '  ',
+    items = { { width = width }, { remaining = true } },
+  }
+
+  pickers
+    .new({}, {
+      prompt_title = ('Compare “%s” with… (Tab: pick two · C-e: send as typed)'):format(word),
+      finder = finders.new_table {
+        results = lemmas,
+        entry_maker = function(entry)
+          return {
+            value = entry.lemma,
+            -- The translation is searchable too: the word you can't spell is
+            -- usually the one you remember only by its meaning.
+            ordinal = table.concat({ entry.lemma, plain(entry.lemma), entry.ru }, ' '),
+            display = function()
+              return displayer { entry.lemma, { entry.ru, 'TelescopeResultsComment' } }
+            end,
+          }
+        end,
+      },
+      sorter = conf.generic_sorter {},
+      attach_mappings = function(prompt_bufnr, map)
+        local function typed()
+          return one_line(action_state.get_current_line())
+        end
+
+        actions.select_default:replace(function()
+          local others = {}
+          for _, entry in ipairs(action_state.get_current_picker(prompt_bufnr):get_multi_selection()) do
+            others[#others + 1] = entry.value
+          end
+          if #others == 0 then
+            -- A word that isn't in the log matches nothing, so Enter falls
+            -- through to whatever was typed.
+            local selected = action_state.get_selected_entry()
+            local text = typed()
+            others = selected and { selected.value } or (text ~= '' and { text } or {})
+          end
+          actions.close(prompt_bufnr)
+          submit(others)
+        end)
+
+        -- Fuzzy matching is loose, so a new word often still "matches" some
+        -- logged lemma. This sends the prompt exactly as typed instead.
+        map({ 'i', 'n' }, '<C-e>', function()
+          local text = typed()
+          actions.close(prompt_bufnr)
+          submit(text ~= '' and { text } or {})
+        end)
+
+        return true
+      end,
+    })
+    :find()
+end
+
+local function compare_word()
+  local word = cursor_word()
+  if not word then
+    return
+  end
+  local line = vim.api.nvim_win_get_cursor(0)[1]
+  compare(word, line, line)
+end
+
+local function compare_visual()
+  local text, first, last = visual_selection()
+  -- Leave visual mode right now rather than via the typeahead, or the queued
+  -- <Esc> lands in the picker's prompt once it opens.
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'nx', false)
+
+  if text == '' then
+    warn 'Selection is empty - nothing sent.'
+    return
+  end
+  compare(text, first, last)
+end
+
+--- Every word and phrase in the log, one row per entry, as returned by
+--- `bin/sk-phrases --entries`. The script owns the log format; this only
+--- splits its columns.
+---@return table[]|nil entries, or nil after notifying why there are none
+local function collect_entries(root)
+  local script = root .. '/bin/sk-phrases'
+  if vim.fn.executable(script) ~= 1 then
+    warn(('%s is missing or not executable.'):format(vim.fn.fnamemodify(script, ':~')))
+    return nil
+  end
+
+  local ok, res = pcall(function()
+    return vim.system({ script, '--entries' }, { text = true }):wait()
+  end)
+  if not ok or res.code ~= 0 then
+    local err = ok and vim.trim(res.stderr or '') or ''
+    warn(err ~= '' and err or 'bin/sk-phrases failed.')
+    return nil
+  end
+
+  local entries = {}
+  for line in vim.gsplit(res.stdout or '', '\n', { trimempty = true }) do
+    local f = vim.split(line, '\t', { plain = true })
+    if #f >= 9 then
+      entries[#entries + 1] = {
+        log_line = f[1],
+        type = f[2],
+        lemma = f[3],
+        form = f[4],
+        ru = f[5],
+        carded = f[6] ~= '',
+        path = root .. '/' .. f[7],
+        lnum = tonumber(f[8]),
+        title = f[9],
+      }
+    end
+  end
+  if #entries == 0 then
+    warn 'No words or phrases in log.jsonl yet.'
+    return nil
+  end
+  return entries
+end
+
+--- Put the cursor on `form` in the current buffer, near `lnum`.
+---
+--- The line in the log is where the word was when you asked; texts get
+--- edited and lines drift, so the nearest occurrence of the form within a
+--- few dozen lines wins, and the logged line is only the fallback.
+local function land_on(lnum, form)
+  local last = vim.api.nvim_buf_line_count(0)
+  lnum = math.max(1, math.min(lnum or 1, last))
+  vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+
+  if form ~= '' then
+    local pattern = '\\c\\V\\<' .. vim.fn.escape(form, '\\') .. '\\>'
+    local ahead = vim.fn.searchpos(pattern, 'cnW', math.min(last, lnum + 30))
+    local behind = vim.fn.searchpos(pattern, 'bnW', math.max(1, lnum - 30))
+    local best
+    if ahead[1] ~= 0 then
+      best = ahead
+    end
+    if behind[1] ~= 0 and (not best or lnum - behind[1] < best[1] - lnum) then
+      best = behind
+    end
+    if best then
+      vim.api.nvim_win_set_cursor(0, { best[1], best[2] - 1 })
+    end
+  end
+  vim.cmd 'normal! zz'
+end
+
+--- Turn the picked log entries into raw cards with `bin/promote --entry`.
+--- Runs in the background; the script's own summary comes back as a notice.
+local function promote(root, picked)
+  local cmd = { root .. '/bin/promote' }
+  for _, entry in ipairs(picked) do
+    vim.list_extend(cmd, { '--entry', entry.log_line })
+  end
+
+  info(('Promoting %d…'):format(#picked))
+  vim.system(cmd, { text = true, cwd = root }, function(res)
+    vim.schedule(function()
+      local out = vim.trim(table.concat({ res.stderr or '', res.stdout or '' }, '\n'))
+      if res.code ~= 0 then
+        warn(out ~= '' and out or 'bin/promote failed.')
+      else
+        info(out)
+      end
+    end)
+  end)
+end
+
+--- Find a logged word or phrase by Slovak or Russian, see where it was met,
+--- jump there, or mark entries and turn them into cards.
+---
+---   Enter    open the text at that place
+---   Tab      mark / unmark for promote (S-Tab the same, moving up)
+---   C-s      promote the marked entries, or the one under the cursor
+local function find_words()
+  local buf = vim.api.nvim_buf_get_name(0)
+  local root = project_root(buf ~= '' and buf or (vim.uv.cwd() .. '/.'))
+  if not root then
+    warn 'No CLAUDE.md above this file or the cwd, so the log cannot be found.'
+    return
+  end
+
+  local entries = collect_entries(root)
+  if not entries then
+    return
+  end
+
+  local pickers = require 'telescope.pickers'
+  local finders = require 'telescope.finders'
+  local actions = require 'telescope.actions'
+  local action_state = require 'telescope.actions.state'
+  local entry_display = require 'telescope.pickers.entry_display'
+  local conf = require('telescope.config').values
+
+  local width = 0
+  for _, entry in ipairs(entries) do
+    width = math.max(width, vim.fn.strdisplaywidth(entry.lemma))
+  end
+  local displayer = entry_display.create {
+    separator = '  ',
+    items = { { width = 1 }, { width = math.min(width, 28) }, { width = 40 }, { remaining = true } },
+  }
+
+  local title = 'My words (Tab: mark · C-s: promote)'
+
+  pickers
+    .new({}, {
+      prompt_title = title,
+      finder = finders.new_table {
+        results = entries,
+        entry_maker = function(entry)
+          return {
+            value = entry,
+            path = entry.path,
+            lnum = entry.lnum,
+            -- The form is searchable too, so "návšteve" finds návšteva; the
+            -- translation, so the word you only remember in Russian.
+            ordinal = table.concat({ entry.lemma, plain(entry.lemma), entry.form, plain(entry.form), entry.ru }, ' '),
+            display = function()
+              return displayer {
+                { entry.carded and '✓' or '', 'DiagnosticOk' },
+                entry.lemma,
+                truncate(entry.ru, 40),
+                { entry.title, 'TelescopeResultsComment' },
+              }
+            end,
+          }
+        end,
+      },
+      sorter = conf.generic_sorter {},
+      previewer = conf.file_previewer {},
+      attach_mappings = function(prompt_bufnr, map)
+        local function show_count(picker)
+          local n = #picker:get_multi_selection()
+          local text = n > 0 and ('%s — marked %d'):format(title, n) or title
+          pcall(function()
+            picker.layout.prompt.border:change_title(text)
+          end)
+        end
+
+        -- A lemma that already has a card would only be skipped by promote,
+        -- so it is not marked in the first place.
+        local function toggle(move)
+          return function()
+            local picker = action_state.get_current_picker(prompt_bufnr)
+            local selected = action_state.get_selected_entry()
+            if selected and selected.value.carded then
+              warn(('%s already has a card.'):format(selected.value.lemma))
+            else
+              actions.toggle_selection(prompt_bufnr)
+            end
+            move(prompt_bufnr)
+            show_count(picker)
+          end
+        end
+
+        map({ 'i', 'n' }, '<Tab>', toggle(actions.move_selection_worse))
+        map({ 'i', 'n' }, '<S-Tab>', toggle(actions.move_selection_better))
+
+        actions.select_default:replace(function()
+          local selected = action_state.get_selected_entry()
+          actions.close(prompt_bufnr)
+          if selected then
+            vim.cmd.edit(vim.fn.fnameescape(selected.value.path))
+            land_on(selected.value.lnum, selected.value.form)
+          end
+        end)
+
+        map({ 'i', 'n' }, '<C-s>', function()
+          local picked = vim.tbl_map(function(e)
+            return e.value
+          end, action_state.get_current_picker(prompt_bufnr):get_multi_selection())
+          if #picked == 0 then
+            local selected = action_state.get_selected_entry()
+            if not selected then
+              return
+            end
+            if selected.value.carded then
+              warn(('%s already has a card.'):format(selected.value.lemma))
+              return
+            end
+            picked = { selected.value }
+          end
+          actions.close(prompt_bufnr)
+          promote(root, picked)
+        end)
+
+        return true
+      end,
+    })
+    :find()
+end
+
 --- Open the most recently modified text, no picker.
 local function open_latest_text()
   local entries = collect_texts()
@@ -818,6 +1204,10 @@ function M.setup(opts)
       send_word 'SKV'
     end, 'Explain word in [S]lovak')
 
+    map('n', 'c', compare_word, '[C]ompare word with another (/sk-diff)')
+
+    map('x', 'c', compare_visual, '[C]ompare selection with another (/sk-diff)')
+
     map('n', 'i', show_ipa, '[I]PA of word under cursor')
 
     map('n', 'd', function()
@@ -829,10 +1219,11 @@ function M.setup(opts)
     end, 'Mark text dropped here ([X])')
   end
 
-  -- Global, unlike the eight above: you open a text from wherever you are, not
+  -- Global, unlike the ten above: you open a text from wherever you are, not
   -- only from inside another markdown buffer.
   vim.keymap.set('n', config.prefix .. 't', pick_text, { desc = 'Slovak [T]exts (newest first)' })
   vim.keymap.set('n', config.prefix .. 'l', open_latest_text, { desc = 'Slovak [L]atest text' })
+  vim.keymap.set('n', config.prefix .. 'f', find_words, { desc = '[F]ind my words (jump, promote)' })
 
   vim.api.nvim_create_autocmd('FileType', {
     group = vim.api.nvim_create_augroup('slovak-reader', { clear = true }),

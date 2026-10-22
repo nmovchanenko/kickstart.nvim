@@ -50,17 +50,20 @@ All of them start with `<leader>r`, and your leader is the spacebar. So
 | `<leader>rs` | normal | Sends the word under the cursor as `SKV>`, presses Enter. Claude explains it in Slovak. You stay in Neovim. |
 | `<leader>rs` | visual | Sends the selection as `SKV>`, presses Enter. Claude explains it in Slovak. You stay in Neovim. |
 | `<leader>ra` | visual | Sends the selection and waits, cursor lands in the Claude pane so you can type a question. |
+| `<leader>rc` | normal | Picks one or two words to compare the word under the cursor with, sends `/sk-diff`, presses Enter. You stay in Neovim. |
+| `<leader>rc` | visual | The same, for the selection. |
 | `<leader>ri` | normal | Shows the IPA transcription of the word under the cursor. Stays in Neovim, sends nothing to Claude. |
 | `<leader>rd` | normal | Marks the text as done, at the cursor line. Sends nothing to Claude. |
 | `<leader>rx` | normal | Marks the text as dropped, at the cursor line. Sends nothing to Claude. |
 | `<leader>rt` | normal | Opens a picker of all your texts, newest first. |
 | `<leader>rl` | normal | Opens the most recently modified text straight away. |
+| `<leader>rf` | normal | Finds a word or phrase you've looked up. Enter jumps to where you met it; Tab marks, C-s makes cards. |
 
 Everything arrives as one line, because Claude Code submits on Enter and a
 multi-line paste would fire off half a sentence.
 
-The first eight only exist in markdown buffers, since they act on the text you're
-reading. `<leader>rt` and `<leader>rl` are global, because you use them to open a
+The first ten only exist in markdown buffers, since they act on the text you're
+reading. `<leader>rt`, `<leader>rl` and `<leader>rf` are global, because you use them to open a
 text in the first place, usually from an empty Neovim.
 
 ## Examples
@@ -172,6 +175,75 @@ SK> texts/lekcia.md:7 :: Krátky riadok. :: why is this instrumental?
 
 This is the one that moves your focus. The others leave you in Neovim on
 purpose, so you can fire off five words in a row and read the answers later.
+
+### Comparing two words
+
+You hit *pokyny* and it feels like the *návod* you saw last week. Put the
+cursor inside `pokyny` on line 21 and press `<leader>rc`. A picker opens with
+every word you have asked about, its translation next to it, most-asked first:
+
+```
+╭──────────── Compare “pokyny” with… (Tab: pick two · C-e: send as typed) ────────────╮
+│  pokyn    указания, инструкции                                                      │
+│> návod    инструкция, руководство                                                   │
+╰─────────────────────────────────────────────────────────────────────────────────────╯
+│> инструкц                                                                     2 / 561 │
+```
+
+The translation is searchable, which is the point: the second word is usually
+the one you remember by meaning, not by spelling. `navod` finds `návod` too,
+diacritics or not. Enter sends:
+
+```
+/sk-diff texts/2026-09-25-mili-rodicia.md:21 :: pokyny | návod
+```
+
+Three ways to choose:
+
+- **Enter** takes the highlighted word.
+- **Tab** marks a word; mark two and Enter compares all three.
+- **Ctrl-e** sends exactly what you typed. Use it for a word you have never
+  asked about. Enter would not do: fuzzy matching is loose, so `rada` still
+  "matches" `úrad`, and Enter would send that. A prompt that matches nothing
+  at all goes out as typed with Enter too.
+
+Claude runs the comparison in the background, so carry on reading and keep
+sending `SK>`. A short answer turns up in the Claude pane when it's ready, with
+the path of a file holding the full comparison.
+
+The list comes from `bin/sk-phrases --type word --tsv` in the texts
+repository, found next to your `CLAUDE.md` like `bin/sk-status`.
+
+## Finding your words
+
+`<leader>rf` lists every word and phrase in `log.jsonl`, one row per time you
+asked about it, so a word met in three texts shows three rows, side by side:
+
+```
+✓  zdroj      источник              Ako sa obklopiť slovenčinou?
+✓  zdroj      источник              Ako na slovíčka? Časť II.
+   zapojiť    включить, вовлечь     Ako sa obklopiť slovenčinou?
+```
+
+Type Slovak or Russian: the lemma, the form you met ("zdrojom") and the
+translation are all searchable, and "navsteva" finds *návšteva*. The preview
+shows the text at the logged line. `✓` means the lemma already has a card.
+
+| Keys | What happens |
+|------|--------------|
+| `Enter` | Opens the text with the cursor on the word. |
+| `Tab` / `S-Tab` | Marks or unmarks the row for a card. The title counts the marks. |
+| `C-s` | Runs `bin/promote --entry` on the marked rows, or on the row under the cursor if none are marked. The result comes back as a notice. |
+
+Texts get edited and lines shift, so Enter lands on the nearest occurrence of
+the form within 30 lines of the logged one, not blindly on that line.
+
+A card is made from the sentence of the row you marked, not from whichever one
+`bin/promote` would have chosen. The cards come out raw: craft them with
+`/sk-card` as usual. Rows that already have a card can't be marked.
+
+The data comes from `bin/sk-phrases --entries` in the repository the current
+file (or the cwd) lives in, found by its `CLAUDE.md`.
 
 ## Opening a text
 
@@ -318,6 +390,17 @@ SKV> <path>:<start>-<end> :: <text>
 The difference is on Claude's side: it explains the text in Slovak and doesn't
 write the question to the log.
 
+```
+/sk-diff <path>:<line> :: <word> | <word>
+/sk-diff <path>:<start>-<end> :: <word> | <word> | <word>
+```
+
+`/sk-diff` is a Claude Code command, so it has to start the line. Same path and
+line as `SK>`. The first word is the one from the text, as written there; the
+others are lemmas from the picker or whatever you typed. They're separated by
+` | ` because a lemma can be two words (`dohovoriť sa`). Two or three words in
+total, never more. Like `SKV>`, nothing goes to the log.
+
 The path is relative to your project root, and the root is the nearest parent
 directory containing a `CLAUDE.md`. With this tree:
 
@@ -391,6 +474,10 @@ notification in Neovim.
 | `No markdown texts in ...` | The folder is there but holds no `.md` files. |
 | `.../bin/sk-status is missing or not executable` | The texts repository has no `bin/sk-status`, or it lost its `x` bit. Check with `ls -l bin/sk-status` in the repository. |
 | `No CLAUDE.md above this file, so bin/sk-status cannot be found` | The text isn't inside the texts repository, so there's no root to find the script in. |
+| `bin/sk-phrases is missing or not executable` | `<leader>rc` can't get the word list. Check with `ls -l bin/sk-phrases` in the repository. |
+| `No CLAUDE.md above this file, so bin/sk-phrases cannot be found` | As for `bin/sk-status`: the text isn't inside the texts repository. |
+| `Compare with at most two words` | You marked three or more in the `<leader>rc` picker. |
+| `Nothing picked or typed` | Ctrl-e on an empty prompt. |
 | `Cursor is inside the front matter` | `<leader>rd` and `<leader>rx` need the cursor in the text itself. |
 | `Buffer has unsaved changes` | The script works on the file on disk. Save first, `:w`, then mark. |
 | `sk-status: ...` | The script ran and refused. The rest of the message is its own explanation. |

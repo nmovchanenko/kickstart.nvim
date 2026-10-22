@@ -15,6 +15,7 @@ return {
   keys = {
     { '<leader>rt', desc = 'Slovak texts (newest first)' },
     { '<leader>rl', desc = 'Slovak latest text' },
+    { '<leader>rf', desc = 'Find my words (jump, promote)' },
   },
   config = function()
     require('custom.slovak_reader').setup()
